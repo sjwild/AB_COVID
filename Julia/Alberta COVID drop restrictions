@@ -1,0 +1,891 @@
+
+# Load packages
+using Pkg
+
+Pkg.activate("COVID_19")
+
+ENV["CMDSTAN"] = expanduser("~/cmdstan/")
+
+using Plots, StatsPlots
+using CSV, DataFrames, HTTP
+using Dates, Measures
+using Turing, ReverseDiff, Memoization
+using StanSample
+using RCall
+
+
+# Function to pull quantiles
+function get_qs(y_pre_fit::DataFrame, 
+                y_est::DataFrame;
+                ll::Float64 = 0.025,
+                ul::Float64 = 0.975)
+  
+  fit_n = size(y_pre_fit, 2)
+  est_n = size(y_est, 2)
+  y_fit_m = [mean(y_pre_fit[:, i]) for i in 1:fit_n]
+  y_fit_ll = [quantile(y_pre_fit[:, i], ll) for i in 1:fit_n]
+  y_fit_ul = [quantile(y_pre_fit[:, i], ul) for i in 1:fit_n]
+  
+  # Next post period
+  y_post_m = [mean(y_est[:, i]) for i in 1:est_n]
+  y_post_ll = [quantile(y_est[:, i], ll) for i in 1:est_n]
+  y_post_ul = [quantile(y_est[:, i], ul) for i in 1:est_n]
+
+  # combine values into one vector each
+  synth_m = vcat(y_fit_m, y_post_m)
+  synth_ll = vcat(y_fit_ll, y_post_ll)
+  synth_ul = vcat(y_fit_ul, y_post_ul)
+
+  return synth_m, synth_ll, synth_ul
+
+end
+
+
+
+
+# Function to plot baseplot
+function plot_base(title::String,
+  ylabel::String,
+  xlabel::String;
+  title_position = :left,
+  size = (800, 500),
+  xrotation = 45,
+  legend = :topleft,
+  legend_foreground_color = nothing,
+  bottom_margin = 17mm,
+  left_margin = 5mm,
+  tickfontsize = 12,
+  titlefontsize = 16,
+  legendfontsize = 10,
+  guidefontsize = 14,
+  grid = :off, 
+  kwargs...)
+
+   return plot(;title = title,
+    ylabel = ylabel,
+    xlabel = xlabel,
+    title_position = title_position,
+    size = size,
+    xrotation = xrotation,
+    legend = legend,
+    legend_foreground_color = legend_foreground_color,
+    bottom_margin = bottom_margin, left_margin = left_margin,
+    tickfontsize = tickfontsize, titlefontsize = titlefontsize,
+    legendfontsize = legendfontsize,
+    guidefontsize = guidefontsize,
+    grid = grid, kwargs...)
+
+end
+
+
+
+
+
+# Note that ReadStatt.jl does not seem to work with Julia 1.7.2 yet. 
+# So we will use RCall
+R"""
+library(tidyverse)
+library(haven)
+
+# This code comes from Scot Cunningham's Mixtape
+read_data <- function(df)
+{
+  full_path <- paste("https://raw.github.com/scunning1975/mixtape/master/", 
+                     df, sep = "")
+  df <- read_dta(full_path)
+  return(df)
+}
+
+texas <- read_data("texas.dta") %>%
+  as.data.frame(.)
+
+"""
+
+df_texas = @rget texas
+
+
+
+drop_fips = [3, 7, 14, 43, 52]
+df_texas.bmpercap = df_texas.bmprison ./ df_texas.bmpop
+df_texas_bscm = df_texas[in(drop_fips).(df_texas.statefip) .== false, [:year, :statefip, :bmprison]]
+df_texas_bscm.statefip = [join(["statefips_", df_texas_bscm.statefip[i]]) for i in 1:size(df_texas_bscm, 1)]
+df_texas_bscm = unstack(df_texas_bscm, :statefip, :bmprison)
+
+adj_factor = 10_000
+
+ind = contains.(names(df_texas_bscm), "statefips_48")
+X_texas = Matrix{Float64}(df_texas_bscm[:, Not(ind)])[:, 2:51] ./ adj_factor
+y_texas = Vector{Float64}(df_texas_bscm[:, ind][:, 1]) ./ adj_factor
+
+yr = 1993
+X_texas_pre = X_texas[df_texas_bscm.year .≤ yr, :]
+X_texas_post = X_texas[df_texas_bscm.year .> yr, :]
+y_texas_pre = y_texas[df_texas_bscm.year .≤ yr]
+y_texas_post = y_texas[df_texas_bscm.year .> yr]
+
+
+
+
+# run stan data
+# run first stan model
+# Note we need to transpose our X matrices
+texas_data = Dict(
+  
+  "N_pre" => size(X_texas_pre', 2), # Numbers of pre observations
+  "N_post" => size(X_texas_post', 2), # Number of post observations
+  "p" => size(X_texas_pre', 1), # Size of donor pool
+  "y_pre" => y_texas_pre,
+  "X_pre" => X_texas_pre',
+  "X_post" => X_texas_post',
+  
+  "scale_alpha" => 1,
+  "scale_g" => 1,
+  
+  "slab_scale" => 1,
+  "slab_df" => 5,
+  
+  "nu_g" => 3,
+  "nu_l" => 3
+  
+)
+
+# load temp directory for model output
+tmpdir = joinpath(@__DIR__, "tmp")
+
+# run model
+sm = SampleModel("bscm", read("Stan/bscm_horseshoe_modified.stan", String), tmpdir)
+rc_texas = stan_sample(sm; 
+                       data = texas_data,
+                       num_samples = 1500,
+                       num_warmups = 1500,
+                       num_chains = 4,  
+                       delta = 0.999,
+                       max_depth = 15,
+                       seed = 47318)
+
+
+
+if success(rc_texas)
+  diagnose(sm)
+  params_out = DataFrame(read_samples(sm))
+  gq = stan_generate_quantities(sm)
+end
+
+
+# Plot outcome
+texas_fit = gq[:, 1:length(y_texas_pre)]
+texas_est = gq[:, (length(y_texas_pre) + 1):(length(y_texas_pre) + length(y_texas_post))]
+
+texas_m, texas_ll, texas_ul = get_qs(texas_fit, texas_est)
+
+texas_trend = plot_base("Synthetic control estimates: Mixtape example of\nblack prison population in Texas",
+                        "Number of black prisoners (10,000s)",
+                        "Year";
+                        top_margin = 5mm)
+plot!(texas_trend, Int.(unique(df_texas.year)), texas_m, 
+      ribbon = (texas_m - texas_ll, texas_ul - texas_m),
+      label = "Estimated trend",
+      lw = 3,
+      lc = :blue, fill = :blue)
+plot!(texas_trend, Int.(unique(df_texas.year)), vcat(y_texas_pre, y_texas_post), 
+      label = "Actual", 
+      lc = :black,
+      lw = 3);
+vline!(texas_trend, [1993],
+       lc = :blue, linestyle = :dash,
+       linealpha = 0.5,
+       label = "");
+annotate!(texas_trend, 1992.9, 5.5, 
+          StatsPlots.text("Policy change",
+          10, :right));
+annotate!(texas_trend, 2000, -0.8,
+          StatsPlots.text("Source: https://raw.github.com/scunning1975/mixtape/master/texas.dta
+          Analysis by sjwild.github.io",
+          :right, 7))
+png(texas_trend, "Images/Alberta/texas_synthetic_control_estimates");
+
+
+
+
+
+# run placebo test
+# Note that this runs with divergent transitions.
+yr_trt = 1990
+yr_end = 1993
+X_texas_pre = X_texas[df_texas_bscm.year .≤ yr_trt, :]
+X_texas_post = X_texas[yr_trt .< df_texas_bscm.year .≤ yr_end, :]
+y_texas_pre = y_texas[df_texas_bscm.year .≤ yr_trt]
+y_texas_post = y_texas[yr_trt .< df_texas_bscm.year .≤ yr_end]
+
+texas_data_placebo = Dict(
+  
+  "N_pre" => size(X_texas_pre', 2), # Numbers of pre observations
+  "N_post" => size(X_texas_post', 2), # Number of post observations
+  "p" => size(X_texas_pre', 1), # Size of donor pool
+  "y_pre" => y_texas_pre,
+  "X_pre" => X_texas_pre',
+  "X_post" => X_texas_post',
+  
+  "scale_alpha" => 1,
+  "scale_g" => 1,
+  
+  "slab_scale" => 1,
+  "slab_df" => 5,
+  
+  "nu_g" => 3,
+  "nu_l" => 3
+  
+)
+
+rc_texas_placebo = stan_sample(sm; 
+                              data = texas_data_placebo,
+                              num_samples = 3000,
+                              num_warmups = 1500,
+                              num_chains = 4,  
+                              delta = 0.999, # Micheal Betancourt is going to be so mad at me for this
+                              max_depth = 15,
+                              seed = 47318)
+
+
+
+if success(rc_texas_placebo)
+  diagnose(sm)
+  params_out = DataFrame(read_samples(sm))
+  gq = stan_generate_quantities(sm)
+end
+
+
+# Plot outcome
+texas_fit = gq[:, 1:length(y_texas_pre)]
+texas_est = gq[:, (length(y_texas_pre) + 1):(length(y_texas_pre) + length(y_texas_post))]
+
+texas_m, texas_ll, texas_ul = get_qs(texas_fit, texas_est)
+
+
+texas_trend = plot(Int.(unique(df_texas.year[df_texas.year .≤ yr_end])), texas_m, 
+                   ribbon = (texas_m - texas_ll, texas_ul - texas_m), 
+                   lc = :blue, fill = :blue,
+                   label = "Estimated trend",
+                   title = "Synthetic control estimates: Mixtape example of
+                   black prison population in Texas",
+                   ylabel = "Number of black prisoners (10,000s)",
+                   xlabel = "Year",
+                   lw = 3,
+                   title_position = :left,
+                   size = (800, 500),
+                   xrotation = 45,
+                   legend = :topleft,
+                   legend_foreground_color = nothing,
+                   bottom_margin = 17mm,
+                   left_margin = 5mm,
+                   tickfontsize = 12,
+                   titlefontsize = 16,
+                   legendfontsize = 10,
+                   guidefontsize = 14,
+                   grid = :off);
+plot!(texas_trend, Int.(unique(df_texas.year[df_texas.year .≤ yr_end])), vcat(y_texas_pre, y_texas_post), 
+      label = "Actual", 
+      lc = :black,
+      lw = 3);
+vline!(texas_trend, [yr_trt],
+       lc = :blue, linestyle = :dash,
+       linealpha = 0.5,
+       label = "");
+annotate!(texas_trend, yr_trt - 0.5, 5.5, 
+          StatsPlots.text("Policy change",
+          10, :right));
+annotate!(texas_trend, 1993, -1,
+          StatsPlots.text("Source: https://raw.github.com/scunning1975/mixtape/master/texas.dta
+          Analysis by sjwild.github.io",
+          :right, 7));
+png(texas_trend, "Images/Alberta/texas_synthetic_control_estimates_placebo");
+
+
+
+
+
+
+
+
+
+
+
+
+# Download data and prep it for later steps
+# Load data for Canada
+url_canada = "https://health-infobase.canada.ca/src/data/covidLive/covid19-download.csv"
+df_canada = CSV.read(HTTP.get(url_canada).body, DataFrame)
+rename!(df_canada, :prname => :Province_State,
+                   :numtoday => :cases,
+                   :numconf => :total_cases)
+df_canada = df_canada[ in([1, 99]).(df_canada.pruid) .== false, :]
+
+
+
+# Load data for US
+url_cdc = "https://data.cdc.gov/api/views/9mfq-cb36/rows.csv?accessType=DOWNLOAD"
+df_cdc = CSV.read(HTTP.get(url_cdc).body, DataFrame; normalizenames = true)
+rename!(df_cdc, :submission_date => :date,
+                :new_case => :cases,
+                :tot_cases => :total_cases)
+df_cdc.date = replace.(df_cdc.date, "/" => "-")
+df_cdc.date = Date.(df_cdc.date, dateformat"mm-dd-yyyy")
+
+
+# get full state names and combine with CDC data
+state_url = "https://github.com/jasonong/List-of-US-States/raw/master/states.csv"
+state_names = CSV.read(HTTP.get(state_url).body, DataFrame; normalizenames = true)
+rename!(state_names, :Abbreviation => :state,
+                     :State => :Province_State)
+df_cdc = leftjoin(df_cdc, state_names, on = :state)
+dropmissing!(df_cdc, :Province_State)
+
+
+
+# Load stringency index
+url_stringency = "https://github.com/OxCGRT/covid-policy-tracker/raw/master/data/OxCGRT_withnotes_2021.csv"
+df_stringency = CSV.read(HTTP.get(url_stringency).body, DataFrame; normalizenames = true)
+dropmissing!(df_stringency, :RegionName)
+filter!(row -> in(["Canada", "United States"]).(row.CountryName), df_stringency)
+
+df_stringency.Date = Date.(string.(df_stringency.Date), dateformat"yyyymmdd")
+
+
+# build df and filter by date
+df = append!(df_canada[:, [:date, :Province_State, :total_cases]], df_cdc[:, [:date, :Province_State, :total_cases]])
+start_date = Date(2021, 07, 01) - Day(98)
+end_date = Date(2021, 07, 01) + Day(90)
+filter!(row -> start_date .≤ row.date .≤ end_date, df)
+
+# add in population
+# add in population totals to compute cases per 100k
+fn_usa = "Data/US population.csv"
+fn_can = "Data/Canada population.csv"
+pop_canada = CSV.read(fn_can, DataFrame; normalizenames = true,)
+pop_usa = CSV.read(fn_usa, DataFrame; normalizenames = true,)
+rename!(pop_usa, :State => :Province_State)
+rename!(pop_canada, :Geography => :Province_State)
+pop_canada.Province_State = replace.(pop_canada.Province_State, " 6" => "")
+
+# clean and parse population
+pop_canada.X2019 = replace.(pop_canada.X2019, "," => "")
+pop_canada.X2019 = parse.(Float64, pop_canada.X2019)
+pop_usa.X2019 = replace.(pop_usa.X2019, "," => "")
+pop_usa.X2019 = parse.(Float64, pop_usa.X2019)
+
+pop = append!(pop_canada[:, [:Province_State, :X2019]], pop_usa[:, [:Province_State, :X2019]])
+
+
+# Produce image of alberta stringency index
+pr = unique(df_stringency.RegionName)
+
+# Base plot
+ab_plot = plot(title = "Stringency index: Alberta vs. other provinces and states",
+               title_position = :left,
+               xrotation = 45,
+               legend = nothing,
+               grid = nothing,
+               tickfontsize = 10,
+               guidefontsize = 12,
+               size = (750, 450),
+               bottom_margin = 20mm,
+               left_margin = 5mm)
+
+# For loop for all provinces and states except Alberta
+for p in 1:length(pr)
+    pr_name = pr[p]
+
+    if pr_name != "Alberta"
+        @df df_stringency[(df_stringency.RegionName .== pr_name) .&
+             (start_date .≤ df_stringency.Date .≤ end_date), :] plot!(ab_plot, :Date, :StringencyIndex,
+        lw = 1,
+        lc = :grey,
+        lalpha = .3)
+    end
+
+end
+
+# Add Alberta and annotations
+@df df_stringency[(df_stringency.RegionName .== "Alberta") .&
+          (start_date .≤ df_stringency.Date .≤ end_date), :] plot!(ab_plot, :Date, :StringencyIndex,
+      lw = 3,
+      lc = :red,
+      ylabel = "Index value")
+annotate!(ab_plot, Date(2021, 09, 30), -8,
+          StatsPlots.text("Source: Oxford COVID-19 Government Response Tracker,
+          Blavatnik School of Government, University of Oxford
+          Analysis by sjwild.github.io",
+          :right, 7))
+annotate!(ab_plot, Date(2021, 07, 05), 90,
+          StatsPlots.text("Most restrictions dropped",
+                          :left, 8))
+vline!(ab_plot, [Date(2021, 07, 01)],
+       lc = :red,
+       linestyle = :dash,
+       lalpha = 0.5)
+png(ab_plot, "Images/Alberta/AB_stringency_index")   # save image
+
+
+
+
+
+# Produce plot showing cases per day and then showing seven-day moving average
+# First, combine cases data and population data
+# Then filter
+date_list = unique(df.date)[2:end]
+df.newdate = [join(["X", df.date[i]]) for i in 1:size(df, 1)]
+df.newdate = replace.(df.newdate, "-" => "_")
+df = unstack(df[:, [:newdate, :Province_State, :total_cases]], :newdate, :total_cases)
+df = innerjoin(df, pop, on = :Province_State)
+
+
+
+# get cases pre day
+pop_scale = 100_000
+y_raw = diff(Matrix{Float64}(df[df.Province_State .== "Alberta", 2:(end-1)]), dims = 2) ./ df[df.Province_State .== "Alberta", end] * pop_scale
+X_raw =  diff(Matrix{Float64}(df[df.Province_State .!= "Alberta", 2:(end-1)]), dims = 2) ./ df[df.Province_State .!= "Alberta", end] * pop_scale
+
+
+
+# Plot cases per day
+cp_plot = plot(ylabel = "Cases per 100 thousand",
+               title = "AB new cases per day",
+               title_position = :left,
+               xrotation = 45,
+               legend = nothing,
+               grid = nothing,
+               tickfontsize = 10,
+               guidefontsize = 12,
+               size = (750, 450),
+               bottom_margin = 17mm,
+               left_margin = 5mm)
+
+for i in 1:size(X_raw, 1)
+    plot!(cp_plot, date_list, X_raw[i, :],
+          lc = :grey50,
+          lalpha = 0.3)
+end
+
+plot!(cp_plot, date_list, y_raw[1, :],
+      lc = :red,
+      linewidth = 2)
+annotate!(cp_plot, Date(2021, 07, 05), 375,
+          StatsPlots.text("Most restrictions dropped",
+                          :left, 8))
+vline!(cp_plot, [Date(2021, 07, 01)],
+       lc = :red,
+       linestyle = :dash,
+       lalpha = 0.5)
+annotate!(cp_plot, Date(2021, 09, 30), -385,
+      StatsPlots.text("Source: Government of Canada and CDC
+      Analysis by sjwild.github.io",
+      :right, 7))
+png(cp_plot, "Images/Alberta/AB_cases_per_capita")
+
+
+
+# Plot 7-day moving average
+# First get containers
+y = Vector{Float64}()
+X = Matrix{Float64}(undef, (size(X_raw, 1), size(X_raw, 2) - 6))
+
+# Calculate 7-day moving average
+for j in 7:length(y_raw)
+  push!(y, sum(y_raw[(j-6):j])/7)
+  
+  for i in 1:size(X_raw, 1)
+    X[i, (j-6)] = sum(X_raw[i, (j-6):j]) / 7
+  end
+
+end
+
+# Plot
+ra_plot = plot(ylabel = "Cases per 100 thousand",
+               title = "7-day moving avergage of cases in Alberta,\nbefore and after July 1, 2021",
+               title_position = :left,
+               xrotation = 45,
+               legend = nothing,
+               grid = nothing,
+               tickfontsize = 10,
+               guidefontsize = 12,
+               size = (750, 450),
+               bottom_margin = 17mm,
+               left_margin = 5mm,
+               top_margin = 5mm)
+for i in 1:63
+  plot!(ra_plot, date_list[7:end], X[i, :], lc = :grey50, lalpha = 0.3)
+end
+
+plot!(ra_plot, date_list[7:end], y, 
+      lc = :red, 
+      linewidth = 2)
+vline!(ra_plot, [Date(2021, 07, 01)],
+       lc = :red,
+       linestyle = :dash,
+       lalpha = 0.5)
+annotate!(ra_plot, Date(2021, 09, 30), -100,
+          StatsPlots.text("Source: Government of Canada and CDC
+          Analysis by sjwild.github.io",
+          :right, 7))
+annotate!(ra_plot, Date(2021, 07, 05), 150,
+          StatsPlots.text("Most restrictions dropped",
+                          :left, 8))
+png(ra_plot, "Images/Alberta/AB_cases_7_day_average")
+
+
+# Build first stan model
+
+# get names of all provinces and states that have a higher stringency on July 1,
+# which is the date AB "opened for summer"
+filter!(row -> row.Date .== Date(2021, 07, 01), df_stringency)
+ab = df_stringency.StringencyIndex[df_stringency.RegionName .== "Alberta"]
+
+# get value of AB stringecy index on July 1, 2021
+stringency_idx = df_stringency.RegionName[df_stringency.StringencyIndex .> ab]
+
+# Remove states with zero reported cases
+indx = [sum(X[i, :] .≤ 0) for i in 1:63]
+X = X[indx .== 0, :]
+
+# Get names of provinces and states with stringency 
+# index who are still in the dataset
+Province_State = df.Province_State[df.Province_State .!= "Alberta"]
+Province_State = Province_State[indx .== 0]
+
+# Keep states and provinces with stringency index greater than AB
+Province_State_idx = in(stringency_idx).(Province_State)
+
+# Remove states with stringency index greater than AB on July 1, 2021
+X = X[Province_State_idx, :]
+
+
+
+# Plot using only control group
+cg_plot = plot(ylabel = "Cases per 100 thousand",
+               title = "7-day moving avergage of cases in Alberta,\ncompared to control group",
+               title_position = :left,
+               xrotation = 45,
+               legend = nothing,
+               grid = nothing,
+               tickfontsize = 10,
+               guidefontsize = 12,
+               size = (750, 450),
+               bottom_margin = 17mm,
+               left_margin = 5mm,
+               top_margin = 5mm)
+for i in 1:size(X, 1)
+  plot!(cg_plot, date_list[7:end], X[i, :], lc = :grey50, lalpha = 0.3)
+end
+
+plot!(cg_plot, date_list[7:end], y, 
+      lc = :red, 
+      linewidth = 2)
+vline!(cg_plot, [Date(2021, 07, 01)],
+       lc = :red,
+       linestyle = :dash,
+       lalpha = 0.5)
+annotate!(cg_plot, Date(2021, 09, 30), -75,
+          StatsPlots.text("Source: Government of Canada and CDC
+          Analysis by sjwild.github.io",
+          :right, 7))
+annotate!(cg_plot, Date(2021, 07, 05), 150,
+          StatsPlots.text("Most restrictions dropped",
+                          :left, 8))
+png(cg_plot, "Images/Alberta/AB_cases_compared_to_control_group")
+
+
+
+# Fit normal model
+# Build pre and post values
+trt_value = 91
+y_pre = y[1:trt_value]
+y_post = y[(trt_value+1):end]
+X_pre = X[:, 1:trt_value]
+X_post = X[:, (trt_value+1):end]
+
+# Data for Stan
+AB_data = Dict(
+  
+  "N_pre" => size(X_pre, 2), # Numbers of pre observations
+  "N_post" => size(X_post, 2), # Number of post observations
+  "p" => size(X_pre, 1), # Size of donor pool
+  "y_pre" => log.(y_pre),
+  "X_pre" => log.(X_pre),
+  "X_post" => log.(X_post),
+  
+  "scale_alpha" => 1,
+  "scale_g" => 1,
+  
+  "slab_scale" => 1,
+  "slab_df" => 5,
+  
+  "nu_g" => 3,
+  "nu_l" => 3
+  
+)
+
+
+# Run model
+rc_AB = stan_sample(sm; 
+                    data = AB_data,
+                    num_samples = 1000,
+                    num_warmups = 1000,
+                    num_chains = 4,
+                    delta = 0.999,
+                    max_depth = 15,
+                    seed = 33294)
+
+
+# check diagnostics and extract parameters
+if success(rc_AB)
+    diagnose(sm)
+    params_out = DataFrame(read_samples(sm))
+    gq = stan_generate_quantities(sm)
+end
+  
+# Transform parameters
+y_fit = gq[:, 1:length(y_pre)]
+y_post_est = gq[:, (length(y_pre) + 1):(length(y_pre) + length(y_post))]
+y_fit = exp.(y_fit)
+y_post_est = exp.(y_post_est)
+  
+
+# Build series for plotting.
+# Start with pre-period fitted values
+AB_m, AB_ll, AB_ul = get_qs(y_fit, y_post_est)
+
+# dates
+date_list = [(start_date + Day(7)):Day(1):end_date;]
+
+
+AB_trend = plot_base("Synthetic control estimates: Alberta 7-day moving average",
+                     "Num cases (per 100k)",
+                     "Date";
+                     legend = :bottomleft)
+plot!(date_list, AB_m, 
+      ribbon = (AB_m - AB_ll, AB_ul - AB_m),
+      lc = :red, fill = :red, lw = 3,
+      label = "Estimated trend")
+plot!(AB_trend, date_list, vcat(y_pre, y_post), 
+      label = "Actual", 
+      lc = :black,
+      lw = 3)
+vline!(AB_trend, [Date(2021, 07, 01)],
+       lc = :red, linestyle = :dash,
+       linealpha = 0.5,
+       label = "")
+annotate!(AB_trend, Date(2021, 07, 03), 45, 
+          StatsPlots.text("Most restrictions dropped",
+          10, :left))
+annotate!(AB_trend, Date(2021, 09, 30), -20,
+          StatsPlots.text("Source: Government of Canada and CDC
+          Analysis by sjwild.github.io",
+          :right, 7))
+png(AB_trend, "Images/Alberta/synthetic_control_estimates")
+  
+AB_trend
+
+
+
+
+
+
+
+
+# run placebo test
+trt_value_placebo = 60
+end_value = 90
+y_pre_placebo = y[1:trt_value_placebo]
+y_post_placebo = y[(trt_value_placebo+1):end_value]
+X_pre_placebo = X[:, 1:trt_value_placebo]
+X_post_placebo = X[:, (trt_value_placebo+1):end_value]
+
+
+# Fit lognormal model
+AB_data_placebo = Dict(
+  
+  "N_pre" => size(X_pre_placebo, 2), # Numbers of pre observations
+  "N_post" => size(X_post_placebo, 2), # Number of post observations
+  "p" => size(X_pre_placebo, 1), # Size of donor pool
+  "y_pre" => log.(y_pre_placebo),
+  "X_pre" => log.(X_pre_placebo),
+  "X_post" => log.(X_post_placebo),
+  
+  "scale_alpha" => 1,
+  "scale_g" => 1,
+  
+  "slab_scale" => 1,
+  "slab_df" => 5,
+  
+  "nu_g" => 3,
+  "nu_l" => 3
+  
+)
+
+rc_AB_placebo = stan_sample(sm; 
+                    data = AB_data_placebo,
+                    num_samples = 1000,
+                    num_warmups = 1000,
+                    num_chains = 4,
+                    delta = 0.999,
+                    max_depth = 15,
+                    seed = 33294)
+
+
+                    # check diagnostics and extract parameters
+if success(rc_AB_placebo)
+    diagnose(sm)
+    params_out = DataFrame(read_samples(sm))
+    gq = stan_generate_quantities(sm)
+end
+  
+# Transform parameters
+y_fit_placebo = gq[:, 1:length(y_pre_placebo)]
+y_post_est_placebo = gq[:, (length(y_pre_placebo) + 1):(length(y_pre_placebo) + length(y_post_placebo))]
+  
+# transform to correct scale
+y_fit_placebo = exp.(y_fit_placebo)
+y_post_est_placebo = exp.(y_post_est_placebo)
+  
+
+# Build series for plotting.
+# Start with pre-period fitted values
+AB_m_placebo, AB_ll_placebo, AB_ul_placebo = get_qs(y_fit_placebo, y_post_est_placebo)
+
+# dates
+date_list_placebo = [(start_date + Day(7)):Day(1):Date(2021, 06, 30);]
+  
+AB_trend_placebo = plot(date_list_placebo, AB_m_placebo, 
+                ribbon = (AB_m_placebo - AB_ll_placebo, AB_ul_placebo - AB_m_placebo), 
+                lc = :red, fill = :red,
+                label = "Estimated trend",
+                title = "Synthetic control estimates: Placebo test for AB",
+                ylabel = "Num cases (per 100k)",
+                lw = 3,
+                title_position = :left,
+                size = (800, 500),
+                xrotation = 45,
+                legend = :bottomleft,
+                legend_foreground_color = nothing,
+                bottom_margin = 17mm,
+                left_margin = 5mm,
+                tickfontsize = 12,
+                titlefontsize = 16,
+                legendfontsize = 10,
+                guidefontsize = 14,
+                grid = :off)
+plot!(AB_trend_placebo, date_list_placebo, vcat(y_pre_placebo, y_post_placebo), 
+      label = "Actual", 
+      lc = :black,
+      lw = 3)
+vline!(AB_trend_placebo, [Date(2021, 05, 31)],
+       lc = :red, linestyle = :dash,
+       linealpha = 0.5,
+       label = "")
+annotate!(AB_trend_placebo, Date(2021, 06, 01), 45, 
+          StatsPlots.text("Restrictions dropped",
+          10, :left))
+annotate!(AB_trend_placebo, Date(2021, 07, 01), -20,
+          StatsPlots.text("Source: Government of Canada and CDC
+          Analysis by sjwild.github.io",
+          :right, 7))
+png(AB_trend_placebo, "Images/Alberta/synthetic_control_estimates_placebo")
+  
+AB_trend_placebo
+
+
+
+
+
+
+
+
+# use lognormalAB_data_ln = Dict(
+  
+  "N_pre" => size(X_pre, 2), # Numbers of pre observations
+  "N_post" => size(X_post, 2), # Number of post observations
+  "p" => size(X_pre, 1), # Size of donor pool
+  "y_pre" => y_pre,
+  "X_pre" => log.(X_pre),
+  "X_post" => log.(X_post),
+  
+  "scale_alpha" => 1,
+  "scale_g" => 1,
+  
+  "slab_scale" => 1,
+  "slab_df" => 5,
+  
+  "nu_g" => 3,
+  "nu_l" => 3
+  
+)
+sm_ln = SampleModel("bscm_ln", read("Stan/bscm_horseshoe_lognormal.stan", String), tmpdir)
+
+rc_AB = stan_sample(sm_ln; 
+                    data = AB_data_ln,
+                    num_samples = 1000,
+                    num_warmups = 1000,
+                    num_chains = 4,
+                    delta = 0.999,
+                    max_depth = 15,
+                    seed = 33294)
+
+
+# check diagnostics and extract parameters
+if success(rc_AB)
+    diagnose(sm_ln)
+    params_out = DataFrame(read_samples(sm_ln))
+    sigma = params_out.sigma
+    gq = stan_generate_quantities(sm_ln)
+end
+  
+# Transform parameters
+y_fit = gq[:, 1:length(y_pre)]
+y_post_est = gq[:, (length(y_pre) + 1):(length(y_pre) + length(y_post))]
+
+betas = params_out[:, contains.(names(params_out), "beta.")]
+ 
+
+
+
+
+
+
+
+
+
+# Fit Pinkney model
+y
+X
+
+X_pinkney = vcat(y', X)
+
+AB_data_pinkney = Dict(
+  
+  "T" => size(X_pinkney, 2),           # Numbers of total observation
+  "J" => size(X_pinkney, 1),      # Number of provinces and states
+  "L" => 10,                           # Number of factors
+  "Y" => X_pinkney',                    # data matrix of order [J,T]
+  "trt_times" => 91
+  
+)
+
+# run model
+smp = SampleModel("bscm_p", read("Stan/bscm_pinkney_no_predictors.stan", String), tmpdir)
+rc_AB_pinkney = stan_sample(smp; 
+                            data = AB_data_pinkney,
+                            num_samples = 1500,
+                            num_warmups = 1500,
+                            num_chains = 4,  
+                            delta = 0.999,
+                            max_depth = 15,
+                            seed = 51432)
+
+
+
+if success(rc_AB_pinkney)
+  diagnose(smp)
+  params_out = DataFrame(read_samples(smp))
+  gq = stan_generate_quantities(smp)
+end
+
