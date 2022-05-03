@@ -1,0 +1,191 @@
+#filter!(row -> in(["New Brunswick"]).(row.RegionName), df_stringency)
+
+
+pr = unique(df_stringency.RegionName)
+
+
+ab_plot = plot(title = "Stringency index: Alberta vs. other provinces and states",
+               title_position = :left,
+               xrotation = 45,
+               legend = nothing,
+               size = (750, 450),
+               bottom_margin = 15mm,
+               left_margin = 5mm)
+for p in 1:length(pr)
+
+    pr_name = pr[p]
+
+    tmp = df_stringency[start_date .≤ df_stringency.Date .≤ end_date, :]
+
+    if pr_name != "Alberta"
+        #@df df_stringency[df_stringency.RegionName .== pr_name, :] plot!(ab_plot, :Date, :StringencyIndex,
+        @df tmp[tmp.RegionName .== pr_name, :] plot!(ab_plot, :Date, :StringencyIndex,
+        lw = 1,
+        lc = :grey,
+        lalpha = .3)
+    end
+
+end
+
+
+@df df_stringency[(df_stringency.RegionName .== "Alberta") .&
+                     (start_date .≤ df_stringency.Date .≤ end_date), :] plot!(ab_plot, :Date, :StringencyIndex,
+    lw = 3,
+    lc = :red,
+    ylabel = "Index value")
+annotate!(ab_plot, Date(2021, 09, 30), 0,
+          StatsPlots.text("Source: Oxford COVID-19 Government Response Tracker,\nBlavatnik School of Government, University of Oxford",
+          :right, 7))
+annotate!(ab_plot, Date(2021, 07, 05), 90,
+          StatsPlots.text("Most restrictions dropped",
+          :left, 7))
+vline!(ab_plot, [Date(2021, 07, 01)],
+       lc = :red,
+       linestyle = :dash,
+       lalpha = 0.5)
+
+
+png(ab_plot, "Images/AB_stringency_index")
+
+
+df = append!(df_canada[:, [:date, :Province_State, :total_cases]], df_cdc[:, [:date, :Province_State, :total_cases]])
+filter!(row -> start_date .≤ row.date .≤ end_date, df)
+date_list = unique(df.date)[2:end]
+df.newdate = [join(["X", df.date[i]]) for i in 1:size(df, 1)]
+df.newdate = replace.(df.newdate, "-" => "_")
+df = unstack(df[:, [:newdate, :Province_State, :total_cases]], :newdate, :total_cases)
+df = innerjoin(df, pop, on = :Province_State)
+
+
+
+# get number of new cases per day
+pop_scale = 100_000
+y_raw = diff(Matrix{Float64}(df[df.Province_State .== "Alberta", 2:(end-1)]), dims = 2) ./ df[df.Province_State .== "Alberta", end] * pop_scale
+X_raw =  diff(Matrix{Float64}(df[df.Province_State .!= "Alberta", 2:(end-1)]), dims = 2) ./ df[df.Province_State .!= "Alberta", end] * pop_scale
+
+
+cp = plot(legend = false,
+          ylabel = "Cases per 100 thousand",
+          title = "AB 7-day rolling average",
+          title_position = :left,
+          size = (750, 450),
+          bottom_margin = 12mm,
+          left_margin = 5mm,
+          xrotation = 45)
+for i in 1:size(X_raw, 1)
+    plot!(cp, date_list, X_raw[i, :],
+          lc = :grey50,
+          lalpha = 0.3)
+end
+plot!(cp, date_list, y_raw[1, :],
+      lc = :red,
+      linewidth = 2)
+annotate!(cp, Date(2021, 09, 30), -325,
+      StatsPlots.text("Source: Government of Canada and CDC",
+      :right, 7))
+png(cp, "Images/AB_cases_index")
+
+
+
+
+# Convert into 7 day rolling average and plot
+y = Vector{Float64}()
+X = Matrix{Float64}(undef, (size(X_raw, 1), size(X_raw, 2) - 6))
+for j in 7:length(y_raw)
+  push!(y, sum(y_raw[(j-6):j])) / 7
+  
+  for i in 1:size(X_raw, 1)
+    X[i, (j-6)] = sum(X_raw[i, (j-6):j]) / 7
+  end
+
+end
+
+p = plot(legend = :false,
+             bottommargin = 5mm,
+             rightmargin = 5mm,
+             ylabel = "Cases per 100k population")
+for i in 1:63
+  plot!(p, X[i, :], lc = :grey75)
+end
+plot!(p, y, lc = :red, linewidth = 2,
+      title = "7-day moving avergage of cases in Alberta,\nbefore and after July 1, 2021",
+      titleposition = :left)
+
+
+df_stringency.StringencyIndex[(df_stringency.RegionName .== "Alberta") .& 
+              (df_stringency.Date .== Date(2021, 07, 01))][1]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+url_stringency2020 = "https://github.com/OxCGRT/covid-policy-tracker/raw/master/data/OxCGRT_withnotes_2020.csv"
+url_stringency2021 = "https://github.com/OxCGRT/covid-policy-tracker/raw/master/data/OxCGRT_withnotes_2021.csv"
+url_stringency2022 = "https://github.com/OxCGRT/covid-policy-tracker/raw/master/data/OxCGRT_withnotes_2022.csv"
+#url_stringency = "https://github.com/OxCGRT/covid-policy-tracker/raw/master/data/OxCGRT_latest_withnotes.csv"
+df_stringency = vcat(CSV.read(HTTP.get(url_stringency2020).body, DataFrame; normalizenames = true),
+                     CSV.read(HTTP.get(url_stringency2021).body, DataFrame; normalizenames = true),
+                     CSV.read(HTTP.get(url_stringency2022).body, DataFrame; normalizenames = true))
+dropmissing!(df_stringency, :RegionName)
+filter!(row -> in(["Canada"]).(row.CountryName), df_stringency)
+
+df_stringency.Date = Date.(string.(df_stringency.Date), dateformat"yyyymmdd")
+
+
+pr = unique(df_stringency.RegionName)
+
+
+nb_plot = plot(title = "Stringency index: NB vs. other provinces",
+               title_position = :left,
+               xrotation = 45,
+               legend = nothing,
+               size = (750, 450),
+               bottom_margin = 15mm,
+               left_margin = 5mm)
+for p in 1:length(pr)
+
+    pr_name = pr[p]
+
+    #tmp = df_stringency[start_date .≤ df_stringency.Date .≤ end_date, :]
+    tmp = df_stringency
+
+
+    if pr_name != "New Brunswick"
+        #@df df_stringency[df_stringency.RegionName .== pr_name, :] plot!(ab_plot, :Date, :StringencyIndex,
+        @df tmp[tmp.RegionName .== pr_name, :] plot!(nb_plot, :Date, :StringencyIndex,
+        lw = 1,
+        lc = :grey,
+        lalpha = .3)
+    end
+
+end
+
+
+@df df_stringency[(df_stringency.RegionName .== "New Brunswick"), :] plot!(nb_plot, :Date, :StringencyIndex,
+    lw = 3,
+    lc = :red,
+    ylabel = "Index value")
+annotate!(nb_plot, maximum(df_stringency.Date), -20,
+          StatsPlots.text("Source: Oxford COVID-19 Government Response Tracker,\nBlavatnik School of Government, University of Oxford",
+          :right, 7))
+png(nb_plot, "Images/NB_stringency_index")
