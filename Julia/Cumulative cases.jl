@@ -417,7 +417,7 @@ rc_AB_direct = stan_sample(sm;
                            num_warmups = 1000,
                            num_chains = 4,
                            delta = 0.999,
-                           max_depth = 20,
+                           max_depth = 20, # for some reason this was needed on an earlier version. Something is clearly wrong.
                            seed = 33294)
 
 
@@ -428,22 +428,22 @@ if success(rc_AB_direct)
     gq = stan_generate_quantities(sm)
 end
 
-y_fit_direct = gq[:, 1:length(y_pre_direct)] .+ y_mean
-y_post_est_direct = gq[:, (length(y_pre_direct) + 1):(length(y_pre_direct) + length(y_post_direct))] .+ y_mean
+y_fit_direct = gq[:, 1:length(y_pre_direct)] .+ y_mean_direct 
+y_post_est_direct = gq[:, (length(y_pre_direct) + 1):(length(y_pre_direct) + length(y_post_direct))] .+ y_mean_direct 
 y_fit_direct = exp.(y_fit_direct)
 y_post_est_direct = exp.(y_post_est_direct)
 AB_m_direct, AB_ll_direct, AB_ul_direct = get_qs(y_fit_direct, y_post_est_direct)
 
 y_actual = Matrix{Float64}(df[df.Province_State .== "Alberta", 9:(end-1)]) ./ df[df.Province_State .== "Alberta", end] * pop_scale
 
-date_list = [(start_date):Day(1):end_date;]
+date_list = [(start_date + Day(7)):Day(1):end_date;]
 
-
+# Plot directly modeled cumulative cases
 AB_trend_direct = plot_base("Synthetic control estimates: Directly modelling\ncumulative cases",
                             "Num cases (per 100k)",
                             "Date")
-plot!(AB_trend_direct, date_list, AB_m, 
-      ribbon = (AB_m - AB_ll, AB_ul - AB_m),
+plot!(AB_trend_direct, date_list, AB_m_direct, 
+      ribbon = (AB_m_direct - AB_ll_direct, AB_ul_direct - AB_m_direct),
       lc = :red, fill = :red, lw = 3,
       label = "Estimated trend";
       top_margin = 5mm)
@@ -460,7 +460,7 @@ hline!(AB_trend_direct, [exp(y_mean)],
        linealpha = 0.5,
        lw = 2,
        label = "")
-annotate!(AB_trend_direct, Date(2021, 07, 03), 45, 
+annotate!(AB_trend_direct, Date(2021, 07, 03), 9000, 
           StatsPlots.text("Most restrictions dropped",
           10, :left))
 png(AB_trend_direct, "Images/Alberta/cumulative_cases")
