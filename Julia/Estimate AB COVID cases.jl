@@ -755,7 +755,7 @@ end
 AB_m_c, AB_ll_c, AB_ul_c = get_qs(y_fit, y_post_est)
 
 
-AB_trend_c = plot_base("Cumulative cases based on\n7-day moving average",
+AB_trend_c = plot_base("Cumulative cases based on 7-day moving average",
                        "Num cases (per 100k)",
                        "Date";
                        legend = :topleft,
@@ -775,7 +775,7 @@ vline!(AB_trend_c, [Date(2021, 07, 01)],
 annotate!(AB_trend_c, Date(2021, 07, 03), 45, 
           StatsPlots.text("Most guidelines dropped",
           10, :left))
-annotate!(AB_trend_c, Date(2021, 09, 30), 750,
+annotate!(AB_trend_c, Date(2021, 09, 30), 1750,
           StatsPlots.text("Source: Government of Canada and CDC
           Analysis by sjwild.github.io",
           :right, 7))
@@ -864,7 +864,7 @@ vline!(AB_trend_ihs, [Date(2021, 07, 01)],
 annotate!(AB_trend_ihs, Date(2021, 07, 03), 60, 
         StatsPlots.text("Most guidelines dropped",
         10, :left))
-annotate!(AB_trend_ihs, Date(2021, 09, 30), -25,
+annotate!(AB_trend_ihs, Date(2021, 09, 30), -38,
           StatsPlots.text("Source: Government of Canada and CDC
           Analysis by sjwild.github.io",
           :right, 7))
