@@ -360,7 +360,7 @@ annotate!(ab_plot, Date(2021, 09, 30), -8,
           Analysis by sjwild.github.io",
           :right, 7))
 annotate!(ab_plot, Date(2021, 07, 05), 90,
-          StatsPlots.text("Most restrictions dropped",
+          StatsPlots.text("Most guidelines dropped",
                           :left, 8))
 vline!(ab_plot, [Date(2021, 07, 01)],
        lc = :red,
