@@ -589,7 +589,7 @@ hline!(AB_trend_direct, [y_actual[91]],
        linealpha = 0.5,
        lw = 2,
        label = "")
-annotate!(AB_trend_direct, Date(2021, 07, 03), 9000, 
+annotate!(AB_trend_direct, Date(2021, 07, 03), 8000, 
           StatsPlots.text("Most guidelines dropped",
           10, :left))
 annotate!(AB_trend_direct, Date(2021, 09, 30), 750,
@@ -713,7 +713,7 @@ vline!(AB_trend, [Date(2021, 07, 01)],
        linealpha = 0.5,
        label = "")
 annotate!(AB_trend, Date(2021, 07, 03), 45, 
-          StatsPlots.text("Most restrictions dropped",
+          StatsPlots.text("Most guidelines dropped",
           10, :left))
 annotate!(AB_trend, Date(2021, 09, 30), -25,
           StatsPlots.text("Source: Government of Canada and CDC
@@ -772,7 +772,7 @@ vline!(AB_trend_c, [Date(2021, 07, 01)],
        lc = :red, linestyle = :dash,
        linealpha = 0.5,
        label = "")
-annotate!(AB_trend_c, Date(2021, 07, 03), 45, 
+annotate!(AB_trend_c, Date(2021, 07, 03), 6500, 
           StatsPlots.text("Most guidelines dropped",
           10, :left))
 annotate!(AB_trend_c, Date(2021, 09, 30), 1750,
@@ -861,7 +861,7 @@ vline!(AB_trend_ihs, [Date(2021, 07, 01)],
     lc = :red, linestyle = :dash,
     linealpha = 0.5,
     label = "")
-annotate!(AB_trend_ihs, Date(2021, 07, 03), 60, 
+annotate!(AB_trend_ihs, Date(2021, 07, 03), 80, 
         StatsPlots.text("Most guidelines dropped",
         10, :left))
 annotate!(AB_trend_ihs, Date(2021, 09, 30), -38,
