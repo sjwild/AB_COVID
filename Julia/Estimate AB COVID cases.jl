@@ -892,7 +892,7 @@ end
 AB_m_ihs_c, AB_ll_ihs_c, AB_ul_ihs_c = get_qs(y_fit_ihs, y_post_est_ihs)
 
 
-AB_trend_ihs_c = plot_base("Estimated vs acutal cumulative cases in Alberta",
+AB_trend_ihs_c = plot_base("Estimated vs actual cumulative cases in Alberta",
                            "Cumulative cases (per 100k)",
                            "Date";
                            legend = :topleft)
